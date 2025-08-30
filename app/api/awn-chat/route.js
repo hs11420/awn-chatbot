@@ -1,193 +1,164 @@
 // app/api/awn-chat/route.js
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
 import OpenAI from "openai";
 
-const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
-const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
-const CHAT_BYPASS = (process.env.CHAT_BYPASS || "").toString() === "1";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ---------- CORS / Allowed Hosts ----------
+function parseAllowed() {
+  const raw = (process.env.ALLOWED_HOSTS || "").trim();
+  if (!raw) return [];
+  if (raw === "*" || raw === "*,*") return ["*"];
+  return raw.split(",").map(s => s.trim()).filter(Boolean);
+}
+const ALLOWED = parseAllowed();
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (ALLOWED.includes("*")) return true;
   try {
+    if (!origin) return true; // allow server-to-server or same-origin
+    if (ALLOWED.includes("*")) return true;
     const host = new URL(origin).hostname;
-    return ALLOWED.some(a => host === a || host.endsWith("." + a));
-  } catch { return false; }
+    return ALLOWED.some(h => host === h || host.endsWith("." + h));
+  } catch {
+    return false;
+  }
 }
 
-function corsHeaders(origin) {
-  const allow = ALLOWED.includes("*") ? "*" : (origin || "");
-  return {
-    "Access-Control-Allow-Origin": allow,
-    "Vary": "Origin",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  };
-}
-
-function guard(req) {
-  const origin = req.headers.get("origin");
-  return { ok: isAllowedOrigin(origin), origin };
-}
-
-// ---------- Prompt ----------
+// ---------- SYSTEM PROMPT ----------
 const SYSTEM_PROMPT = `
-You are the website chat assistant for AW Nationwide Movers (AWN).
+You are the AW Nationwide Movers chatbot for awnationwide.com.
 
-Mission (in this order):
-1) Be warm, upbeat, relentlessly helpful.
-2) Build trust (licensed/insured, professional crews, COI on booking).
-3) Qualify smoothly with friendly questions.
-4) Close softly: "Reserve a crew window" or "Schedule a 5-minute virtual walkthrough".
-5) Payments when asked/near close:
-   - 50% deposit to reserve
-   - 50% due prior to packing the truck on moving day
-   - Affirm financing: 6 or 12 months, subject to credit approval
+Mission & Tone
+- Warm, upbeat, relentlessly helpful. Replies are concise (2–5 short sentences), plain English, no jargon.
+- We are fully licensed & insured—mention naturally when relevant.
+- Affirm financing available (6 or 12 months, subject to credit approval)—mention gently, not pushy.
+- Experience note: If the user asks about experience (e.g., "how experienced are you?"), you may say: "Our team has over 20 years of experience." Do NOT put this in your opening line unless asked.
 
-Style:
-- Friendly, concise (3–5 sentences), use their name when known, 1–2 questions per turn.
-- No exact prices; discuss factors. Share a soft range only if pushed, then pivot to walkthrough.
+What you do
+- Answer moving questions (availability, timing, services, prep, COI, materials, stairs/elevators/long walks, special/heavy items, packing/unpacking, labor-only, junk removal, senior moves, office/commercial, local & long-distance).
+- Do not give exact prices. If asked, explain cost factors (distance, inventory, access, packing/supplies, special items). Provide a non-binding range only if they insist, then pivot to coordinator follow-up.
+- Offer to check availability and queue details so a coordinator follows up within 24 hours to confirm dates and provide a custom quote.
 
-Collect (LeadCapture):
-- full_name, phone (10-digit US/CA), email, move_date (YYYY-MM-DD),
-- origin_zip, destination_zip, home_size (studio/1BR/2BR/3BR/house),
-- stairs_origin, stairs_destination, elevator_origin (true/false), elevator_destination (true/false),
-- packing_needed (none/partial/full), special_items (piano/safe/pool table/art), notes (include financing_interest, deposit_ack).
+Availability policy (days from inquiry)
+- Interpret the user's move date (natural language ok) vs today's date in chat.
+- 7+ days out: You may confirm availability (no pricing). Add friendly note that coordinator will follow up to finalize window & details.
+- 4–6 days out: You may confirm availability (no pricing) but emphasize we’ll still need to coordinate the exact window and remaining details via quick follow-up.
+- 0–3 days out (short notice): Do NOT confirm availability. Say we'll have someone contact them as soon as possible to confirm and try to accommodate. Encourage a phone number for urgent contact.
+- Avoid promising a specific crew until coordinator confirms.
 
-Close techniques:
-- Assumptive (“Morning or afternoon window?”)
-- Alternative choice
-- Soft deadline (“two crews left for that date”)
-- Trial close
+Conversation style
+- Opening: Ask “How can I help?” and show 3–6 example topics (availability, services, prep, stairs/elevators & specialty items, packing/unpacking, long-distance timing).
+- Ask 1–2 questions per turn. Use their name once you have it.
+- If they mention a page form, offer a choice: use the page form or share details here in chat. Respect their preference.
+- Mention licensed & insured and Affirm gently when relevant.
 
-When user says "reserve" OR all fields are present, output ONLY this JSON:
+Lead capture (when they're ready)
+- When they say reserve/book/check availability/get a quote/send details, or clearly show intent — or when you already have all required fields — collect conversationally:
+  - first_name, last_name
+  - phone (10-digit US/CA), email
+  - move_date (YYYY-MM-DD or convert natural date)
+  - origin_zip, destination_zip
+  - service_type (local, long-distance/national, residential, apartment/condo, house, office/commercial, senior move, labor-only load/unload, packing, unpacking, concierge/white-glove, junk removal, heavy/specialty items)
+  - If residential: home_size (studio/1BR/2BR/3BR/house)
+  - Access notes: stairs_origin, stairs_destination (floors/none); elevator_origin/elevator_destination (true/false)
+  - packing_needed (none/partial/full)
+  - special_items (piano/safe/pool table/art/large appliances/etc.)
+  - promo_code (optional), referral_code (optional)
+  - notes (anything else; include whether they’re interested in financing)
+- Ask for promo/referral code during capture (optional).
+- Before final handoff, confirm if they’re interested in financing via Affirm (yes/no/maybe). Include financing_interest: yes/no/maybe in notes.
+- Keep it friendly; don’t interrogate.
+
+Output rules
+- Normal conversation = plain text.
+- When the user says reserve/book/submit/send my details/check availability, OR all required fields are collected, OR the caller sets force_json=true, output ONLY this JSON (no preface/trailing text):
 {
-  "full_name": "string",
-  "phone": "string",
-  "email": "string",
+  "full_name": "First Last",
+  "phone": "##########",
+  "email": "user@example.com",
   "move_date": "YYYY-MM-DD",
-  "origin_zip": "string",
-  "destination_zip": "string",
-  "home_size": "string",
+  "origin_zip": "#####",
+  "destination_zip": "#####",
+  "service_type": "string",
+  "home_size": "studio|1BR|2BR|3BR|house",
   "stairs_origin": "string",
   "stairs_destination": "string",
   "elevator_origin": true/false,
   "elevator_destination": true/false,
-  "packing_needed": "string",
+  "packing_needed": "none|partial|full",
   "special_items": "string",
-  "notes": "string"
+  "promo_code": "string",
+  "referral_code": "string",
+  "notes": "string (include: financing_interest: yes/no/maybe)"
 }
+- If something required is missing, do not output partial JSON—ask a friendly follow-up question instead.
+
+Closers (after successful submit)
+- End with: "In the next 24 hours, a coordinator will reach out to confirm your move-in date and finalize your personalized quote."
+- Then append ONE randomly selected closer:
+  1) "Thank you for choosing AW Nationwide Movers as your trusted moving partner."
+  2) "We’re honored you chose AW Nationwide Movers. Let’s get you moving."
+  3) "Thanks for trusting AW Nationwide Movers with your move."
 `;
 
+// ---------- Few-shot examples ----------
 const FEW_SHOTS = [
-  { role: "user", content: "Hi, I need help with a 2BR move on Oct 12 from 30309 to 30030" },
-  { role: "assistant", content: "I’d love to help with your Oct 12 move! We have morning and afternoon windows available. To hold a spot and get you a fast written estimate, what’s your full name, best email, and phone? Any stairs or elevators at pickup and drop-off?" },
-  { role: "user", content: "How much will this cost?" },
-  { role: "assistant", content: "It depends on distance, inventory, access, and packing. I can share a ballpark if helpful, then lock in your exact number after a quick 5-minute virtual walkthrough. Would you like to reserve a crew window now or schedule the walkthrough first?" },
-  { role: "user", content: "What’s required to reserve?" },
-  { role: "assistant", content: "To reserve, we take a 50% deposit; the remaining 50% is due prior to packing the truck on moving day. We also offer Affirm financing (6 or 12 months, subject to credit approval). Do you prefer the morning or afternoon window?" }
+  { role: "user", content: "Hi" },
+  { role: "assistant", content: "Hi! 👋 I’m the AW Nationwide Movers chatbot—how can I help today? For example: check a date’s availability, explain services (local/long-distance, packing/unpacking, labor-only, senior or office moves), what to prep before moving day, or how we handle stairs/elevators & specialty items. We’re fully licensed & insured, and Affirm financing is available if helpful." },
+
+  { role: "user", content: "Are you free for Sept 25?" },
+  { role: "assistant", content: "I can check that—what ZIPs are you moving between, and is this residential or office? If it’s 7+ days out, we have availability; I’ll queue details so a coordinator follows up within 24 hours to finalize your window and next steps." },
+
+  { role: "user", content: "Move is in 2 days." },
+  { role: "assistant", content: "For short-notice (0–3 days), we’ll have someone contact you as soon as possible to confirm and try to accommodate. Could I grab your first & last name and the best phone number for urgent follow-up?" },
+
+  { role: "user", content: "How experienced are you?" },
+  { role: "assistant", content: "Our team has over 20 years of experience. Would you like me to check availability for your date?" }
 ];
 
-// ---------- Preflight ----------
-export async function OPTIONS(req) {
-  const { ok, origin } = guard(req);
-  return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
-}
-
-// ---------- Health / Diagnostics ----------
-export async function GET(req) {
-  const { ok, origin } = guard(req);
-  const url = new URL(req.url);
-  const diag = url.searchParams.get("diag") === "1";
-  const body = {
-    ok,
-    route: "awn-chat",
-    origin,
-    allowed: ALLOWED,
-    env: {
-      hasOpenAI: !!OPENAI_API_KEY,
-      bypass: CHAT_BYPASS,
-    },
-    hint: "Set ALLOWED_HOSTS in Vercel (Production). Optional: CHAT_BYPASS=1 to skip OpenAI temporarily."
-  };
-  return new Response(JSON.stringify(diag ? body : { ok, route: "awn-chat" }), {
-    status: ok ? 200 : 403,
-    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-  });
-}
-
-// ---------- Chat ----------
+// ---------- POST: chat ----------
 export async function POST(req) {
-  const { ok, origin } = guard(req);
-  if (!ok) {
-    return new Response(JSON.stringify({ error: "Forbidden origin", allowed: ALLOWED }), {
-      status: 403,
-      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+  const origin = req.headers.get("origin");
+  if (origin && !isAllowedOrigin(origin)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  const { history = [], force_json = false } = await req.json();
+
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...FEW_SHOTS,
+    ...history
+  ];
+
+  if (force_json) {
+    messages.push({
+      role: "user",
+      content: "If you have all required fields, output ONLY the LeadCapture JSON now."
     });
   }
 
   try {
-    const { history = [], force_json = false } = await req.json();
-
-    // Bypass mode for quick success while configuring OpenAI/billing
-    if (CHAT_BYPASS) {
-      const needsJson = /"full_name"|origin_zip|destination_zip|move_date/.test(JSON.stringify(history));
-      const reply = needsJson
-        ? JSON.stringify({
-            full_name: "Test User",
-            phone: "4045551234",
-            email: "test@example.com",
-            move_date: "2025-10-15",
-            origin_zip: "30309",
-            destination_zip: "30030",
-            home_size: "2br",
-            stairs_origin: "none",
-            stairs_destination: "1 flight",
-            elevator_origin: false,
-            elevator_destination: false,
-            packing_needed: "partial",
-            special_items: "none",
-            notes: "financing_interest: yes; deposit_ack: yes"
-          })
-        : "Great news — we have crews available. What’s your move date and the ZIPs you’re moving between?";
-      return new Response(JSON.stringify({ reply }), {
-        status: 200,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
-
-    if (!OPENAI_API_KEY) {
-      return new Response(JSON.stringify({ error: "missing_openai_key" }), {
-        status: 502,
-        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-      });
-    }
-
-    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-    const messages = [{ role: "system", content: SYSTEM_PROMPT }, ...FEW_SHOTS, ...history];
-    if (force_json) {
-      messages.push({ role: "user", content: "If you have all required fields, output ONLY the LeadCapture JSON now." });
-    }
-
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages,
       temperature: 0.4,
+      messages
     });
-
     const reply = completion.choices?.[0]?.message?.content ?? "";
-    return new Response(JSON.stringify({ reply }), {
-      status: 200,
-      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-    });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: "upstream_openai", detail: String(err?.message || err) }), {
-      status: 502,
-      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-    });
+    return Response.json({ reply });
+  } catch (e) {
+    return Response.json({ error: String(e?.message || e) }, { status: 502 });
   }
+}
+
+// ---------- GET: health/debug ----------
+export async function GET(req) {
+  const origin = req.headers.get("origin");
+  return Response.json({
+    ok: true,
+    route: "awn-chat",
+    origin: origin || null,
+    allowed: ALLOWED,
+    env: { hasOpenAI: !!process.env.OPENAI_API_KEY, bypass: !!process.env.CHAT_BYPASS },
+    hint: "Set ALLOWED_HOSTS in Vercel (Production). Optional: CHAT_BYPASS=1 to skip OpenAI temporarily."
+  });
 }
