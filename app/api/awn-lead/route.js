@@ -1,33 +1,32 @@
 // app/api/awn-lead/route.js
 
-const ALLOWED = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,localhost")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
+const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
 
-function isAllowed(origin) {
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (ALLOWED.includes("*")) return true; // wildcard testing
   try {
     const host = new URL(origin).hostname;
-    return ALLOWED.some(allowed => host === allowed || host.endsWith("." + allowed));
+    return ALLOWED.some(a => host === a || host.endsWith("." + a));
   } catch {
     return false;
   }
 }
 
 function corsHeaders(origin) {
+  const allow = ALLOWED.includes("*") ? "*" : (origin || "");
   return {
-    "Access-Control-Allow-Origin": origin || "",
+    "Access-Control-Allow-Origin": allow,
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
 }
 
-function assertAllowed(req) {
+function guard(req) {
   const origin = req.headers.get("origin");
-  if (!origin) return { ok: true, origin: "" };
-  if (isAllowed(origin)) return { ok: true, origin };
-  return { ok: false, origin };
+  return { ok: isAllowedOrigin(origin), origin };
 }
 
 function normalizePhone(raw) {
@@ -46,42 +45,37 @@ const SIZE_MAP = {
   "house": "3 bedroom+"
 };
 
-function mapSize(s) {
-  return SIZE_MAP[(s || "").toLowerCase()] || null;
-}
+function mapSize(s) { return SIZE_MAP[(s || "").toLowerCase()] || null; }
 
-// CORS preflight
+// --------- Preflight ---------
 export async function OPTIONS(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
-
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(origin),
-  });
+  const { ok, origin } = guard(req);
+  if (!ok) return new Response("Forbidden", { status: 403, headers: corsHeaders(origin) });
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
 }
 
-// Simple GET health check
+// --------- Health (debug friendly) ---------
 export async function GET(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
-
-  return new Response(JSON.stringify({ ok: true, route: "awn-lead" }), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(origin),
-    },
+  const { ok, origin } = guard(req);
+  const body = { ok, route: "awn-lead", origin, allowed: ALLOWED };
+  return new Response(JSON.stringify(body), {
+    status: ok ? 200 : 403,
+    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
+// --------- Lead submit ---------
 export async function POST(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
+  const { ok, origin } = guard(req);
+  if (!ok) {
+    return new Response(JSON.stringify({ ok: false, error: "Forbidden origin", origin, allowed: ALLOWED }), {
+      status: 403,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
+  }
 
   const body = await req.json();
   const { lead, utm = {}, page_url, is_test = false } = body || {};
-
   if (!lead) {
     return new Response(JSON.stringify({ ok: false, error: "Missing lead" }), {
       status: 400,
@@ -91,7 +85,6 @@ export async function POST(req) {
 
   try {
     const phone_number = normalizePhone(lead.phone);
-
     const payload = {
       full_name: lead.full_name,
       phone_number,
@@ -109,15 +102,15 @@ export async function POST(req) {
         `Packing: ${lead.packing_needed || "n/a"}`,
         `Special: ${lead.special_items || "n/a"}`
       ].filter(Boolean).join(" | "),
-      referral_source: "Web Chat",
-      referral_details: `URL: ${page_url || ""}`,
-      utm_content: utm.utm_content || undefined,
-      utm_medium: utm.utm_medium || undefined,
-      utm_source: utm.utm_source || undefined,
-      utm_term: utm.utm_term || undefined,
-      ad_click_id: utm.gclid || utm.fbclid || undefined,
-      ad_kind: utm.gclid ? "GOOGLE_ADS" : undefined,
-      is_test: !!is_test
+        referral_source: "Web Chat",
+        referral_details: `URL: ${page_url || ""}`,
+        utm_content: utm.utm_content || undefined,
+        utm_medium: utm.utm_medium || undefined,
+        utm_source: utm.utm_source || undefined,
+        utm_term: utm.utm_term || undefined,
+        ad_click_id: utm.gclid || utm.fbclid || undefined,
+        ad_kind: utm.gclid ? "GOOGLE_ADS" : undefined,
+        is_test: !!is_test
     };
 
     const url = process.env.SUPERMOVE_SWI_URL;
