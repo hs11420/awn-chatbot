@@ -50,8 +50,7 @@ function mapSize(s) { return SIZE_MAP[(s || "").toLowerCase()] || null; }
 // --------- Preflight ---------
 export async function OPTIONS(req) {
   const { ok, origin } = guard(req);
-  if (!ok) return new Response("Forbidden", { status: 403, headers: corsHeaders(origin) });
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
 }
 
 // --------- Health (debug friendly) ---------
@@ -74,16 +73,16 @@ export async function POST(req) {
     });
   }
 
-  const body = await req.json();
-  const { lead, utm = {}, page_url, is_test = false } = body || {};
-  if (!lead) {
-    return new Response(JSON.stringify({ ok: false, error: "Missing lead" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-    });
-  }
-
   try {
+    const body = await req.json();
+    const { lead, utm = {}, page_url, is_test = false } = body || {};
+    if (!lead) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing lead" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+      });
+    }
+
     const phone_number = normalizePhone(lead.phone);
     const payload = {
       full_name: lead.full_name,
@@ -102,15 +101,15 @@ export async function POST(req) {
         `Packing: ${lead.packing_needed || "n/a"}`,
         `Special: ${lead.special_items || "n/a"}`
       ].filter(Boolean).join(" | "),
-        referral_source: "Web Chat",
-        referral_details: `URL: ${page_url || ""}`,
-        utm_content: utm.utm_content || undefined,
-        utm_medium: utm.utm_medium || undefined,
-        utm_source: utm.utm_source || undefined,
-        utm_term: utm.utm_term || undefined,
-        ad_click_id: utm.gclid || utm.fbclid || undefined,
-        ad_kind: utm.gclid ? "GOOGLE_ADS" : undefined,
-        is_test: !!is_test
+      referral_source: "Web Chat",
+      referral_details: `URL: ${page_url || ""}`,
+      utm_content: utm.utm_content || undefined,
+      utm_medium: utm.utm_medium || undefined,
+      utm_source: utm.utm_source || undefined,
+      utm_term: utm.utm_term || undefined,
+      ad_click_id: utm.gclid || utm.fbclid || undefined,
+      ad_kind: utm.gclid ? "GOOGLE_ADS" : undefined,
+      is_test: !!is_test
     };
 
     const url = process.env.SUPERMOVE_SWI_URL;
@@ -140,7 +139,7 @@ export async function POST(req) {
       headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
     });
   } catch (error) {
-    return new Response(JSON.stringify({ ok: false, error: error.message }), {
+    return new Response(JSON.stringify({ ok: false, error: String(error?.message || error) }), {
       status: 400,
       headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
     });
