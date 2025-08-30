@@ -3,39 +3,38 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Allowed hosts (comma-separated list in env); fallback to safe defaults
-const ALLOWED = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,localhost")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+// Accept comma-separated list; support "*" to allow all during testing.
+const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
+const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
 
-function isAllowed(origin) {
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // same-origin / server-to-server
+  if (ALLOWED.includes("*")) return true;   // wildcard testing
   try {
     const host = new URL(origin).hostname;
-    return ALLOWED.some(allowed => host === allowed || host.endsWith("." + allowed));
+    return ALLOWED.some(a => host === a || host.endsWith("." + a));
   } catch {
     return false;
   }
 }
 
 function corsHeaders(origin) {
+  // If wildcard enabled, use "*" to avoid strict origin match issues.
+  const allow = ALLOWED.includes("*") ? "*" : (origin || "");
   return {
-    "Access-Control-Allow-Origin": origin || "",
+    "Access-Control-Allow-Origin": allow,
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
 }
 
-// Security: only allow your domains
-function assertAllowed(req) {
+function guard(req) {
   const origin = req.headers.get("origin");
-  if (!origin) return { ok: true, origin: "" }; // Same-origin or server-to-server
-  if (isAllowed(origin)) return { ok: true, origin };
-  return { ok: false, origin };
+  return { ok: isAllowedOrigin(origin), origin };
 }
 
-// ---- Chat system prompt & few shots (unchanged) ----
+// ---------------- Chat system prompt & few-shots ----------------
 const SYSTEM_PROMPT = `
 You are the website chat assistant for AW Nationwide Movers (AWN).
 
@@ -106,42 +105,39 @@ const FEW_SHOTS = [
   { role: "assistant", content: "To reserve your spot, we take a 50% deposit. The remaining 50% is due prior to packing the truck on moving day. We also offer Affirm financing with 6 or 12-month payment plans, subject to credit approval. Would you prefer the morning or afternoon window for October 12th?" }
 ];
 
-// ---- CORS: OPTIONS preflight ----
+// --------- Preflight ---------
 export async function OPTIONS(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
-
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders(origin),
-  });
+  const { ok, origin } = guard(req);
+  if (!ok) return new Response("Forbidden", { status: 403, headers: corsHeaders(origin) });
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
 }
 
-// ---- Health check / simple GET (lets frontend verify) ----
+// --------- Health (debug friendly) ---------
 export async function GET(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
-
-  return new Response(JSON.stringify({ ok: true, route: "awn-chat" }), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(origin),
-    },
+  const { ok, origin } = guard(req);
+  const body = { ok, route: "awn-chat", origin, allowed: ALLOWED };
+  return new Response(JSON.stringify(body), {
+    status: ok ? 200 : 403,
+    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
-// ---- Main chat POST ----
+// --------- Chat ---------
 export async function POST(req) {
-  const { ok, origin } = assertAllowed(req);
-  if (!ok) return new Response("Forbidden", { status: 403 });
+  const { ok, origin } = guard(req);
+  if (!ok) {
+    return new Response(JSON.stringify({ error: "Forbidden origin", origin, allowed: ALLOWED }), {
+      status: 403,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
+  }
 
   const { history = [], force_json = false } = await req.json();
 
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     ...FEW_SHOTS,
-    ...history
+    ...history,
   ];
 
   if (force_json) {
@@ -158,12 +154,8 @@ export async function POST(req) {
   });
 
   const reply = completion.choices?.[0]?.message?.content ?? "";
-
   return new Response(JSON.stringify({ reply }), {
     status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(origin),
-    },
+    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
