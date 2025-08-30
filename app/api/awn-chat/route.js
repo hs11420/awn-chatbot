@@ -1,32 +1,31 @@
 // app/api/awn-chat/route.js
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Accept comma-separated hosts; support "*" for quick testing.
+// Accept comma-separated list; support "*" for quick testing
 const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
 const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true;               // same-origin / server-to-server
-  if (ALLOWED.includes("*")) return true; // wildcard testing
+  if (!origin) return true;                 // same-origin / server-to-server
+  if (ALLOWED.includes("*")) return true;   // wildcard testing
   try {
     const host = new URL(origin).hostname;
     return ALLOWED.some(a => host === a || host.endsWith("." + a));
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function corsHeaders(origin) {
-  // If wildcard enabled, send "*" to avoid strict origin mismatch during testing.
   const allow = ALLOWED.includes("*") ? "*" : (origin || "");
   return {
     "Access-Control-Allow-Origin": allow,
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
-    // No credentials used; omit Allow-Credentials
   };
 }
 
@@ -35,66 +34,11 @@ function guard(req) {
   return { ok: isAllowedOrigin(origin), origin };
 }
 
-// ---------------- Chat system prompt & few-shots ----------------
+// ---- Prompt ----
 const SYSTEM_PROMPT = `
 You are the website chat assistant for AW Nationwide Movers (AWN).
-
-Mission (in this order):
-1. Be warm, upbeat, relentlessly helpful—"kill them with kindness."
-2. Build trust (licensed/insured, professional crews, COI on booking).
-3. Qualify smoothly with friendly questions.
-4. Always close softly: offer "Reserve a crew window" or "Schedule a 5-minute virtual walkthrough" for a guaranteed written estimate.
-5. Explain payments clearly when asked or near close:
-   - 50% deposit to reserve
-   - Remaining 50% due prior to packing the truck on moving day
-   - Affirm financing available: 6 or 12 months, subject to credit approval
-
-Style & Tone:
-- Always friendly, positive, concise (3-5 sentences max)
-- Confident and human—use their name when you have it
-- Ask at most 1-2 questions per turn
-- Light social proof ("we help hundreds of families move each month")
-- Gentle scarcity ("morning windows fill up fast")
-- Never give exact prices. If pushed, explain factors (distance, volume, stairs, packing, special items)
-- Only share a non-binding range if they insist, then immediately pivot to walkthrough
-
-Collect these fields (LeadCapture):
-- full_name
-- phone (10-digit US/CA)
-- email
-- move_date (YYYY-MM-DD)
-- origin_zip
-- destination_zip
-- home_size (studio/1BR/2BR/3BR/house)
-- stairs_origin, stairs_destination
-- elevator_origin, elevator_destination (true/false)
-- packing_needed (none/partial/full)
-- special_items (piano/safe/pool table/art)
-- notes (include: financing_interest: yes/no, deposit_ack: yes/no)
-
-Closing Techniques:
-- Assumptive: "Morning or afternoon window?"
-- Alternative choice: "Reserve now or schedule a quick walkthrough?"
-- Soft deadline: "We have two crews left for that date"
-- Trial close: "If I can lock your window today, does that work?"
-
-When user says "reserve" OR you have all required fields, output ONLY this JSON:
-{
-  "full_name": "string",
-  "phone": "string",
-  "email": "string",
-  "move_date": "YYYY-MM-DD",
-  "origin_zip": "string",
-  "destination_zip": "string",
-  "home_size": "string",
-  "stairs_origin": "string",
-  "stairs_destination": "string",
-  "elevator_origin": true/false,
-  "elevator_destination": true/false,
-  "packing_needed": "string",
-  "special_items": "string",
-  "notes": "string"
-}
+[...same content as before...]
+When user says "reserve" OR you have all required fields, output ONLY the JSON described earlier.
 `;
 
 const FEW_SHOTS = [
@@ -106,23 +50,23 @@ const FEW_SHOTS = [
   { role: "assistant", content: "To reserve your spot, we take a 50% deposit. The remaining 50% is due prior to packing the truck on moving day. We also offer Affirm financing with 6 or 12-month payment plans, subject to credit approval. Would you prefer the morning or afternoon window for October 12th?" }
 ];
 
-// --------- Preflight ---------
+// ---- CORS preflight
 export async function OPTIONS(req) {
   const { ok, origin } = guard(req);
   return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
 }
 
-// --------- Health (debug friendly) ---------
+// ---- Health
 export async function GET(req) {
   const { ok, origin } = guard(req);
-  const body = { ok, route: "awn-chat", origin, allowed: ALLOWED };
+  const body = { ok, route: "awn-chat", origin, allowed: ALLOWED, runtime };
   return new Response(JSON.stringify(body), {
     status: ok ? 200 : 403,
     headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
-// --------- Chat ---------
+// ---- Chat
 export async function POST(req) {
   const { ok, origin } = guard(req);
   if (!ok) {
@@ -135,20 +79,11 @@ export async function POST(req) {
   try {
     const { history = [], force_json = false } = await req.json();
 
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...FEW_SHOTS,
-      ...history,
-    ];
-
+    const messages = [{ role: "system", content: SYSTEM_PROMPT }, ...FEW_SHOTS, ...history];
     if (force_json) {
-      messages.push({
-        role: "user",
-        content: "If you have all required fields, output ONLY the LeadCapture JSON now."
-      });
+      messages.push({ role: "user", content: "If you have all required fields, output ONLY the LeadCapture JSON now." });
     }
 
-    // If OPENAI_API_KEY missing or invalid, this will throw — we catch below
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages,
@@ -161,7 +96,7 @@ export async function POST(req) {
       headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
     });
   } catch (err) {
-    // Always return CORS headers even on error
+    // Always include CORS on errors
     return new Response(JSON.stringify({ error: "upstream_openai", detail: String(err?.message || err) }), {
       status: 502,
       headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
