@@ -1,9 +1,34 @@
-const ALLOWED_HOSTS = ["awnationwide.com", "www.awnationwide.com", "aw-nationwide-movers.webflow.io", "localhost"];
+// app/api/awn-lead/route.js
 
-const allowOrigin = (origin) => {
-  try { return ALLOWED_HOSTS.some(h => new URL(origin).hostname.endsWith(h)); }
-  catch { return false; }
-};
+const ALLOWED = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,localhost")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isAllowed(origin) {
+  try {
+    const host = new URL(origin).hostname;
+    return ALLOWED.some(allowed => host === allowed || host.endsWith("." + allowed));
+  } catch {
+    return false;
+  }
+}
+
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": origin || "",
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+function assertAllowed(req) {
+  const origin = req.headers.get("origin");
+  if (!origin) return { ok: true, origin: "" };
+  if (isAllowed(origin)) return { ok: true, origin };
+  return { ok: false, origin };
+}
 
 function normalizePhone(raw) {
   const digits = (raw || "").replace(/\D/g, "");
@@ -21,26 +46,52 @@ const SIZE_MAP = {
   "house": "3 bedroom+"
 };
 
-function mapSize(s) { 
-  return SIZE_MAP[(s || "").toLowerCase()] || null; 
+function mapSize(s) {
+  return SIZE_MAP[(s || "").toLowerCase()] || null;
+}
+
+// CORS preflight
+export async function OPTIONS(req) {
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
+
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(origin),
+  });
+}
+
+// Simple GET health check
+export async function GET(req) {
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
+
+  return new Response(JSON.stringify({ ok: true, route: "awn-lead" }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders(origin),
+    },
+  });
 }
 
 export async function POST(req) {
-  const origin = req.headers.get("origin");
-  if (origin && !allowOrigin(origin)) {
-    return new Response("Forbidden", { status: 403 });
-  }
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
 
   const body = await req.json();
   const { lead, utm = {}, page_url, is_test = false } = body || {};
-  
+
   if (!lead) {
-    return Response.json({ ok: false, error: "Missing lead" }, { status: 400 });
+    return new Response(JSON.stringify({ ok: false, error: "Missing lead" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   try {
     const phone_number = normalizePhone(lead.phone);
-    
+
     const payload = {
       full_name: lead.full_name,
       phone_number,
@@ -71,7 +122,10 @@ export async function POST(req) {
 
     const url = process.env.SUPERMOVE_SWI_URL;
     if (!url) {
-      return Response.json({ ok: false, error: "Missing SUPERMOVE_SWI_URL" }, { status: 500 });
+      return new Response(JSON.stringify({ ok: false, error: "Missing SUPERMOVE_SWI_URL" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+      });
     }
 
     const res = await fetch(url, {
@@ -82,11 +136,20 @@ export async function POST(req) {
 
     const text = await res.text();
     if (!res.ok) {
-      return Response.json({ ok: false, status: res.status, error: text }, { status: 502 });
+      return new Response(JSON.stringify({ ok: false, status: res.status, error: text }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+      });
     }
-    
-    return Response.json({ ok: true });
+
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   } catch (error) {
-    return Response.json({ ok: false, error: error.message }, { status: 400 });
+    return new Response(JSON.stringify({ ok: false, error: error.message }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 }
