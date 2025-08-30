@@ -3,13 +3,13 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Accept comma-separated list; support "*" to allow all during testing.
+// Accept comma-separated hosts; support "*" for quick testing.
 const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
 const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // same-origin / server-to-server
-  if (ALLOWED.includes("*")) return true;   // wildcard testing
+  if (!origin) return true;               // same-origin / server-to-server
+  if (ALLOWED.includes("*")) return true; // wildcard testing
   try {
     const host = new URL(origin).hostname;
     return ALLOWED.some(a => host === a || host.endsWith("." + a));
@@ -19,13 +19,14 @@ function isAllowedOrigin(origin) {
 }
 
 function corsHeaders(origin) {
-  // If wildcard enabled, use "*" to avoid strict origin match issues.
+  // If wildcard enabled, send "*" to avoid strict origin mismatch during testing.
   const allow = ALLOWED.includes("*") ? "*" : (origin || "");
   return {
     "Access-Control-Allow-Origin": allow,
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    // No credentials used; omit Allow-Credentials
   };
 }
 
@@ -108,8 +109,7 @@ const FEW_SHOTS = [
 // --------- Preflight ---------
 export async function OPTIONS(req) {
   const { ok, origin } = guard(req);
-  if (!ok) return new Response("Forbidden", { status: 403, headers: corsHeaders(origin) });
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
 }
 
 // --------- Health (debug friendly) ---------
@@ -132,30 +132,39 @@ export async function POST(req) {
     });
   }
 
-  const { history = [], force_json = false } = await req.json();
+  try {
+    const { history = [], force_json = false } = await req.json();
 
-  const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    ...FEW_SHOTS,
-    ...history,
-  ];
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...FEW_SHOTS,
+      ...history,
+    ];
 
-  if (force_json) {
-    messages.push({
-      role: "user",
-      content: "If you have all required fields, output ONLY the LeadCapture JSON now."
+    if (force_json) {
+      messages.push({
+        role: "user",
+        content: "If you have all required fields, output ONLY the LeadCapture JSON now."
+      });
+    }
+
+    // If OPENAI_API_KEY missing or invalid, this will throw — we catch below
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.4,
+    });
+
+    const reply = completion.choices?.[0]?.message?.content ?? "";
+    return new Response(JSON.stringify({ reply }), {
+      status: 200,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
+  } catch (err) {
+    // Always return CORS headers even on error
+    return new Response(JSON.stringify({ error: "upstream_openai", detail: String(err?.message || err) }), {
+      status: 502,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
     });
   }
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages,
-    temperature: 0.4,
-  });
-
-  const reply = completion.choices?.[0]?.message?.content ?? "";
-  return new Response(JSON.stringify({ reply }), {
-    status: 200,
-    headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
-  });
 }
