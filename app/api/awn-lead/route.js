@@ -1,200 +1,94 @@
 // app/api/awn-lead/route.js
-// Node runtime (not edge) because we may use SMTP/Resend and external APIs
-export const runtime = "nodejs";
+import { NextResponse } from 'next/server';
+import { Resend } from 'resend';
 
-import { NextResponse } from "next/server";
+// Build the Resend client (throws if key missing)
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ---- OPTIONAL EMAIL via Resend (recommended) ----
-let resend = null;
-try {
-  // Lazy import to avoid bundling if not used
-  const { Resend } = await import("resend");
-  if (process.env.RESEND_API_KEY) {
-    resend = new Resend(process.env.RESEND_API_KEY);
-  }
-} catch (_) { /* no resend */ }
-
-// Utility: safe fetch with timeout
-async function safeFetch(url, opts = {}, timeoutMs = 12000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...opts, signal: ctrl.signal });
-    clearTimeout(t);
-    return res;
-  } catch (err) {
-    clearTimeout(t);
-    throw err;
-  }
-}
-
-function htmlEscape(s = "") {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function leadToLines(lead = {}) {
-  const lines = [
-    `Service: ${lead.service || "—"}`,
-    `Move date: ${lead.move_date || "—"}`,
-    `ZIPs: ${lead.from_zip || "—"} → ${lead.to_zip || "—"}`,
-    `Home type: ${lead.home_type || "—"}`,
-    `Bedrooms: ${lead.bedrooms || "—"}`,
-    `Stairs/Elevator: ${lead.stairs || "—"}`,
-    `Packing: ${lead.packing || "—"}`,
-    `Special items: ${Array.isArray(lead.heavy) && lead.heavy.length ? lead.heavy.join(", ") : "None"}`,
-    `First name: ${lead.first_name || "—"}`,
-    `Last name: ${lead.last_name || "—"}`,
-    `Email: ${lead.email || "—"}`,
-    `Phone: ${lead.phone || "—"}`,
-    `Promo/Referral: ${lead.promo || "—"}`,
-  ];
-  return lines;
-}
-
-function emailHtml(lead = {}, page_url, ts) {
-  const lines = leadToLines(lead).map(line => htmlEscape(line));
-  return `
-    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#111">
-      <h2 style="margin:0 0 8px 0">New Chat Lead</h2>
-      <div style="color:#666;margin:0 0 10px 0">${ts}</div>
-      <pre style="white-space:pre-wrap;background:#f7f7f9;border:1px solid #eee;border-radius:8px;padding:10px;line-height:1.5">${lines.join("\n")}</pre>
-      ${page_url ? `<div style="margin-top:10px">Page: <a href="${htmlEscape(page_url)}">${htmlEscape(page_url)}</a></div>` : ""}
-    </div>
-  `;
+// helpers
+function safe(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v); } catch { return String(v); }
 }
 
 export async function POST(req) {
-  const started = Date.now();
-  let payload = {};
   try {
-    payload = await req.json();
-  } catch (_) {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+    const body = await req.json(); // { lead, utm, page_url, ... }
+    const lead = body?.lead || body || {};
+
+    // ---- Configure recipients/sender from env ----
+    // During testing you can set:
+    //   LEAD_FROM="AW Movers <onboarding@resend.dev>"
+    // and change later to a verified domain sender.
+    const to   = process.env.LEAD_TO   || 'moves@awnationwide.com';
+    const from = process.env.LEAD_FROM || 'AW Nationwide <onboarding@resend.dev>';
+
+    const subject = `New chat lead – ${lead.name || `${lead.first_name || ''} ${lead.last_name || ''}` || 'Unknown'}`.trim();
+
+    // Plain-text fallback
+    const text = [
+      `New lead from website chat`,
+      ``,
+      `Name: ${lead.name || [lead.first_name, lead.last_name].filter(Boolean).join(' ') || ''}`,
+      `Phone: ${lead.phone || ''}`,
+      `Email: ${lead.email || ''}`,
+      ``,
+      `Service: ${lead.service || ''}`,
+      `Move date: ${lead.move_date || ''}`,
+      `From ZIP: ${lead.from_zip || ''}`,
+      `To ZIP: ${lead.to_zip || ''}`,
+      `Bedrooms: ${lead.bedrooms || ''}`,
+      `Home type: ${lead.home_type || ''}`,
+      `Stairs/Elevator: ${lead.stairs || ''}`,
+      `Packing: ${lead.packing || ''}`,
+      `Heavy/Special: ${Array.isArray(lead.special_items) ? lead.special_items.join(', ') : safe(lead.special_items)}`,
+      `Financing interest: ${lead.financing_interest ? 'Yes' : 'No'}`,
+      `Promo/Referral: ${lead.promo_code || ''}`,
+      ``,
+      `Page URL: ${body.page_url || ''}`,
+      `UTM: ${safe(body.utm)}`
+    ].join('\n');
+
+    // Simple HTML summary
+    const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.4">
+        <h2>New chat lead</h2>
+        <table cellpadding="6" style="border-collapse:collapse">
+          <tr><td><b>Name</b></td><td>${safe(lead.name || [lead.first_name, lead.last_name].filter(Boolean).join(' '))}</td></tr>
+          <tr><td><b>Phone</b></td><td>${safe(lead.phone)}</td></tr>
+          <tr><td><b>Email</b></td><td>${safe(lead.email)}</td></tr>
+          <tr><td><b>Service</b></td><td>${safe(lead.service)}</td></tr>
+          <tr><td><b>Move date</b></td><td>${safe(lead.move_date)}</td></tr>
+          <tr><td><b>From ZIP</b></td><td>${safe(lead.from_zip)}</td></tr>
+          <tr><td><b>To ZIP</b></td><td>${safe(lead.to_zip)}</td></tr>
+          <tr><td><b>Bedrooms</b></td><td>${safe(lead.bedrooms)}</td></tr>
+          <tr><td><b>Home type</b></td><td>${safe(lead.home_type)}</td></tr>
+          <tr><td><b>Stairs/Elevator</b></td><td>${safe(lead.stairs)}</td></tr>
+          <tr><td><b>Packing</b></td><td>${safe(lead.packing)}</td></tr>
+          <tr><td><b>Heavy / Special items</b></td><td>${Array.isArray(lead.special_items) ? lead.special_items.join(', ') : safe(lead.special_items)}</td></tr>
+          <tr><td><b>Financing interest</b></td><td>${lead.financing_interest ? 'Yes' : 'No'}</td></tr>
+          <tr><td><b>Promo / Referral</b></td><td>${safe(lead.promo_code)}</td></tr>
+        </table>
+        <p><b>Page URL:</b> ${safe(body.page_url)}</p>
+        <p><b>UTM:</b> <code>${safe(body.utm)}</code></p>
+      </div>
+    `;
+
+    await resend.emails.send({ to, from, subject, text, html });
+
+    // (Optional) also post to Supermove webhook if you have it:
+    // if (process.env.SUPERMOVE_WEBHOOK_URL) {
+    //   await fetch(process.env.SUPERMOVE_WEBHOOK_URL, {
+    //     method: 'POST',
+    //     headers: { 'Content-Type': 'application/json' },
+    //     body: JSON.stringify(body),
+    //   });
+    // }
+
+    return NextResponse.json({ ok: true, emailed: true });
+  } catch (err) {
+    console.error('awn-lead email error:', err);
+    return NextResponse.json({ ok: false, error: 'email_failed' }, { status: 500 });
   }
-
-  const { lead = {}, page_url, is_test } = payload || {};
-  const ts = new Date().toISOString();
-
-  // ---- Send EMAIL (Resend) ----
-  let emailed = false;
-  let emailError = null;
-
-  if (resend && process.env.LEAD_TO_EMAIL) {
-    try {
-      // choose subject
-      const subj = `AWN Chat Lead • ${lead.move_date || "date?"} • ${lead.from_zip || "—"}→${lead.to_zip || "—"}`;
-      const from = process.env.LEAD_FROM_EMAIL || "leads@awnnationwide.com";
-      const to = process.env.LEAD_TO_EMAIL; // can be comma-separated
-
-      await resend.emails.send({
-        from,
-        to: to.split(",").map(s => s.trim()).filter(Boolean),
-        subject: subj,
-        html: emailHtml(lead, page_url, ts),
-        reply_to: lead.email || undefined,
-      });
-
-      emailed = true;
-    } catch (err) {
-      emailError = String(err?.message || err);
-      if (process.env.LEAD_DEBUG) console.error("EMAIL ERROR:", err);
-    }
-  }
-
-  // ---- Push to SUPERMOVE if configured ----
-  // NOTE: Field names vary by account. Adjust mapping to your Supermove schema.
-  let supermove = false;
-  let supermoveError = null;
-  if (process.env.SUPERMOVE_API_KEY && process.env.SUPERMOVE_API_URL) {
-    try {
-      const smBody = {
-        // This mapping is an example. Update keys to match your Supermove API.
-        first_name: lead.first_name || "",
-        last_name: lead.last_name || "",
-        email: lead.email || "",
-        phone: lead.phone || "",
-        move_date: lead.move_date || "",
-        origin_zip: lead.from_zip || "",
-        destination_zip: lead.to_zip || "",
-        service: lead.service || "",
-        home_type: lead.home_type || "",
-        bedrooms: lead.bedrooms || "",
-        stairs: lead.stairs || "",
-        packing: lead.packing || "",
-        special_items: Array.isArray(lead.heavy) ? lead.heavy : [],
-        promo_code: lead.promo || "",
-        source: "Website Chat",
-        page_url: page_url || "",
-      };
-
-      const res = await safeFetch(process.env.SUPERMOVE_API_URL, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.SUPERMOVE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(smBody),
-      }, 15000);
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`Supermove ${res.status}: ${text.slice(0, 400)}`);
-      }
-      supermove = true;
-    } catch (err) {
-      supermoveError = String(err?.message || err);
-      if (process.env.LEAD_DEBUG) console.error("SUPERMOVE ERROR:", err);
-    }
-  }
-
-  // ---- Optional Slack webhook ----
-  let slack = false;
-  let slackError = null;
-  if (process.env.SLACK_WEBHOOK_URL) {
-    try {
-      const lines = leadToLines(lead);
-      const res = await safeFetch(process.env.SLACK_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: `*New Chat Lead*  (${ts})\n${lines.join("\n")}\n${page_url ? `Page: ${page_url}` : ""}`,
-        }),
-      }, 12000);
-      if (!res.ok) throw new Error(`Slack ${res.status}`);
-      slack = true;
-    } catch (err) {
-      slackError = String(err?.message || err);
-      if (process.env.LEAD_DEBUG) console.error("SLACK ERROR:", err);
-    }
-  }
-
-  const ms = Date.now() - started;
-  return NextResponse.json({
-    ok: true,
-    ms,
-    emailed,
-    supermove,
-    slack,
-    errors: {
-      email: emailError,
-      supermove: supermoveError,
-      slack: slackError,
-    },
-    echo: { is_test: !!is_test },
-  });
-}
-
-// Simple GET health check (handy for debugging from browser)
-export async function GET() {
-  return NextResponse.json({
-    ok: true,
-    targets: {
-      email: !!process.env.RESEND_API_KEY && !!process.env.LEAD_TO_EMAIL,
-      supermove: !!process.env.SUPERMOVE_API_KEY && !!process.env.SUPERMOVE_API_URL,
-      slack: !!process.env.SLACK_WEBHOOK_URL,
-    },
-  });
 }
