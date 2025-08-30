@@ -36,30 +36,37 @@ function normalizePhone(raw) {
   throw new Error("Invalid phone");
 }
 
-const SIZE_MAP = { studio: "Studio", "1br": "1 bedroom", "2br": "2 bedroom", "3br": "3 bedroom", house: "3 bedroom+" };
+// Map to your exact Supermove "Project Size" labels
+const SIZE_MAP = { studio:"Studio", "1br":"1 bedroom", "2br":"2 bedroom", "3br":"3 bedroom", house:"3 bedroom+" };
 const mapSize = s => SIZE_MAP[(s || "").toLowerCase()] || null;
 
-// ---- Preflight
+// ---------- Preflight ----------
 export async function OPTIONS(req) {
   const { ok, origin } = guard(req);
   return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
 }
 
-// ---- Health
+// ---------- Health ----------
 export async function GET(req) {
   const { ok, origin } = guard(req);
-  const body = { ok, route: "awn-lead", origin, allowed: ALLOWED, runtime };
+  const body = {
+    ok,
+    route: "awn-lead",
+    origin,
+    allowed: ALLOWED,
+    env: { hasSupermoveUrl: !!process.env.SUPERMOVE_SWI_URL }
+  };
   return new Response(JSON.stringify(body), {
     status: ok ? 200 : 403,
     headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
-// ---- Lead submit
+// ---------- Lead submit ----------
 export async function POST(req) {
   const { ok, origin } = guard(req);
   if (!ok) {
-    return new Response(JSON.stringify({ ok: false, error: "Forbidden origin", origin, allowed: ALLOWED }), {
+    return new Response(JSON.stringify({ ok: false, error: "Forbidden origin", allowed: ALLOWED }), {
       status: 403,
       headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
     });
@@ -112,7 +119,12 @@ export async function POST(req) {
       });
     }
 
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
     const text = await res.text();
     if (!res.ok) {
       return new Response(JSON.stringify({ ok: false, status: res.status, error: text }), {
