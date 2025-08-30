@@ -1,17 +1,41 @@
+// app/api/awn-chat/route.js
 import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Security: only allow your domains
-const allowOrigin = (origin) => {
-  try { 
-    return ["awnationwide.com", "www.awnationwide.com", "aw-nationwide-movers.webflow.io", "localhost"]
-      .some(h => new URL(origin).hostname.endsWith(h)); 
-  }
-  catch { return false; }
-};
+// Allowed hosts (comma-separated list in env); fallback to safe defaults
+const ALLOWED = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,localhost")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-// Sales Playbook with deposits + Affirm financing
+function isAllowed(origin) {
+  try {
+    const host = new URL(origin).hostname;
+    return ALLOWED.some(allowed => host === allowed || host.endsWith("." + allowed));
+  } catch {
+    return false;
+  }
+}
+
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": origin || "",
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+// Security: only allow your domains
+function assertAllowed(req) {
+  const origin = req.headers.get("origin");
+  if (!origin) return { ok: true, origin: "" }; // Same-origin or server-to-server
+  if (isAllowed(origin)) return { ok: true, origin };
+  return { ok: false, origin };
+}
+
+// ---- Chat system prompt & few shots (unchanged) ----
 const SYSTEM_PROMPT = `
 You are the website chat assistant for AW Nationwide Movers (AWN).
 
@@ -73,23 +97,44 @@ When user says "reserve" OR you have all required fields, output ONLY this JSON:
 }
 `;
 
-// Example conversations to train the bot
 const FEW_SHOTS = [
   { role: "user", content: "Hi, I need help with a 2BR move on Oct 12 from 30309 to 30030" },
   { role: "assistant", content: "I'd love to help with your October 12th move! We have morning and afternoon windows available. To hold a spot and get you a fast written estimate, what's your full name, best email, and phone? Any stairs or elevators at pickup and drop-off?" },
-  
   { role: "user", content: "How much will this cost?" },
   { role: "assistant", content: "Price depends on distance, inventory, building access, and any packing needs. For a 2BR local move like yours, I can share a ballpark range if helpful, then lock in your exact number after a quick 5-minute virtual walkthrough. Would you like to reserve a crew window now or schedule the walkthrough first?" },
-  
   { role: "user", content: "What's required to reserve?" },
   { role: "assistant", content: "To reserve your spot, we take a 50% deposit. The remaining 50% is due prior to packing the truck on moving day. We also offer Affirm financing with 6 or 12-month payment plans, subject to credit approval. Would you prefer the morning or afternoon window for October 12th?" }
 ];
 
+// ---- CORS: OPTIONS preflight ----
+export async function OPTIONS(req) {
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
+
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(origin),
+  });
+}
+
+// ---- Health check / simple GET (lets frontend verify) ----
+export async function GET(req) {
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
+
+  return new Response(JSON.stringify({ ok: true, route: "awn-chat" }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders(origin),
+    },
+  });
+}
+
+// ---- Main chat POST ----
 export async function POST(req) {
-  const origin = req.headers.get("origin");
-  if (origin && !allowOrigin(origin)) {
-    return new Response("Forbidden", { status: 403 });
-  }
+  const { ok, origin } = assertAllowed(req);
+  if (!ok) return new Response("Forbidden", { status: 403 });
 
   const { history = [], force_json = false } = await req.json();
 
@@ -113,5 +158,12 @@ export async function POST(req) {
   });
 
   const reply = completion.choices?.[0]?.message?.content ?? "";
-  return Response.json({ reply });
+
+  return new Response(JSON.stringify({ reply }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders(origin),
+    },
+  });
 }
