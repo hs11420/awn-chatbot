@@ -1,17 +1,17 @@
 // app/api/awn-lead/route.js
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const RAW = (process.env.ALLOWED_HOSTS || "awnationwide.com,www.awnationwide.com,aw-nationwide-movers.webflow.io,localhost").trim();
 const ALLOWED = RAW.split(",").map(s => s.trim()).filter(Boolean);
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
-  if (ALLOWED.includes("*")) return true; // wildcard testing
+  if (ALLOWED.includes("*")) return true;
   try {
     const host = new URL(origin).hostname;
     return ALLOWED.some(a => host === a || host.endsWith("." + a));
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function corsHeaders(origin) {
@@ -36,34 +36,26 @@ function normalizePhone(raw) {
   throw new Error("Invalid phone");
 }
 
-// Map to your exact Supermove "Project Size" labels
-const SIZE_MAP = {
-  "studio": "Studio",
-  "1br": "1 bedroom",
-  "2br": "2 bedroom",
-  "3br": "3 bedroom",
-  "house": "3 bedroom+"
-};
+const SIZE_MAP = { studio: "Studio", "1br": "1 bedroom", "2br": "2 bedroom", "3br": "3 bedroom", house: "3 bedroom+" };
+const mapSize = s => SIZE_MAP[(s || "").toLowerCase()] || null;
 
-function mapSize(s) { return SIZE_MAP[(s || "").toLowerCase()] || null; }
-
-// --------- Preflight ---------
+// ---- Preflight
 export async function OPTIONS(req) {
   const { ok, origin } = guard(req);
   return new Response(null, { status: ok ? 204 : 403, headers: corsHeaders(origin) });
 }
 
-// --------- Health (debug friendly) ---------
+// ---- Health
 export async function GET(req) {
   const { ok, origin } = guard(req);
-  const body = { ok, route: "awn-lead", origin, allowed: ALLOWED };
+  const body = { ok, route: "awn-lead", origin, allowed: ALLOWED, runtime };
   return new Response(JSON.stringify(body), {
     status: ok ? 200 : 403,
     headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
   });
 }
 
-// --------- Lead submit ---------
+// ---- Lead submit
 export async function POST(req) {
   const { ok, origin } = guard(req);
   if (!ok) {
@@ -120,12 +112,7 @@ export async function POST(req) {
       });
     }
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const text = await res.text();
     if (!res.ok) {
       return new Response(JSON.stringify({ ok: false, status: res.status, error: text }), {
